@@ -1,0 +1,24 @@
+## .NET
+bin/
+obj/
+*.user
+*.suo
+.vs/
+_ReSharper*/
+*.DotSettings.user
+
+## Secrets — NEVER commit these
+.env
+*.db
+*.db-shm
+*.db-wal
+**/secrets.json
+**/usersecrets/
+
+## Build output
+publish/
+artifacts/
+
+## OS
+.DS_Store
+Thumbs.db

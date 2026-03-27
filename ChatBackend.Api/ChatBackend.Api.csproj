@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>12</LangVersion>
+    <RootNamespace>ChatBackend.Api</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Rate-limiting middleware (built-in .NET 8) -->
+    <!--<PackageReference Include="Microsoft.AspNetCore.RateLimiting" Version="8.0.6" />-->
+
+    <!-- EF Core tools target (needed for migrations via dotnet-ef) -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="8.0.6">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="Swashbuckle.AspNetCore" Version="8.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ChatBackend.Core\ChatBackend.Core.csproj" />
+    <ProjectReference Include="..\ChatBackend.Infrastructure\ChatBackend.Infrastructure.csproj" />
+  </ItemGroup>
+
+</Project>

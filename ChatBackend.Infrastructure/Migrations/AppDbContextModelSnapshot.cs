@@ -15,7 +15,7 @@ namespace ChatBackend.Infrastructure.Migrations
         protected override void BuildModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
-            modelBuilder.HasAnnotation("ProductVersion", "8.0.6");
+            modelBuilder.HasAnnotation("ProductVersion", "10.0.11");
 
             modelBuilder.Entity("ChatBackend.Core.Models.Conversation", b =>
                 {
@@ -39,7 +39,7 @@ namespace ChatBackend.Infrastructure.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("UserId");
+                    b.HasIndex("UserId", "UpdatedAt");
 
                     b.ToTable("Conversations");
                 });
@@ -71,7 +71,7 @@ namespace ChatBackend.Infrastructure.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("ConversationId");
+                    b.HasIndex("ConversationId", "CreatedAt");
 
                     b.ToTable("Messages");
                 });

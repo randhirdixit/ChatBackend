@@ -15,35 +15,22 @@ namespace ChatBackend.Infrastructure.Meta;
 /// per inbound message so scoped services (AppDbContext, ChatOrchestrator) are
 /// never tied to — or disposed by — the HTTP request lifetime.
 /// </summary>
-public sealed class MetaWhatsAppHandler
+public sealed class MetaWhatsAppHandler(
+    IServiceScopeFactory scopeFactory,
+    HttpClient http,
+    IConfiguration config,
+    ILogger<MetaWhatsAppHandler> logger)
 {
-    private readonly IServiceScopeFactory _scopeFactory;
-    private readonly HttpClient           _http;
-    private readonly IConfiguration       _config;
-    private readonly ILogger<MetaWhatsAppHandler> _logger;
-
-    public MetaWhatsAppHandler(
-        IServiceScopeFactory scopeFactory,
-        HttpClient           http,
-        IConfiguration       config,
-        ILogger<MetaWhatsAppHandler> logger)
-    {
-        _scopeFactory = scopeFactory;
-        _http         = http;
-        _config       = config;
-        _logger       = logger;
-    }
-
     // ── Webhook verification (GET) ────────────────────────────────────
 
     public (bool valid, string challenge) VerifyWebhook(
         string mode, string token, string challenge)
     {
-        var expected = _config["Meta:VerifyToken"];
+        var expected = config["Meta:VerifyToken"];
 
         if (string.IsNullOrWhiteSpace(expected))
         {
-            _logger.LogError(
+            logger.LogError(
                 "Meta:VerifyToken is not configured. " +
                 "Run: dotnet user-secrets set \"Meta:VerifyToken\" \"your_token\"");
             return (false, string.Empty);
@@ -52,16 +39,56 @@ public sealed class MetaWhatsAppHandler
         if (mode == "subscribe" &&
             string.Equals(token, expected, StringComparison.Ordinal))
         {
-            _logger.LogInformation("Meta webhook verified successfully.");
+            logger.LogInformation("Meta webhook verified successfully.");
             return (true, challenge);
         }
 
-        _logger.LogWarning(
+        logger.LogWarning(
             "Webhook verification failed. " +
             "ModeOk={ModeOk} TokenMatch={TokenMatch}",
             mode == "subscribe", token == expected);
 
         return (false, string.Empty);
+    }
+
+    // ── Webhook signature validation (POST) ───────────────────────────
+
+    public bool ValidateSignature(string rawBody, string? signatureHeader)
+    {
+        var appSecret = config["Meta:AppSecret"];
+
+        if (string.IsNullOrWhiteSpace(appSecret))
+        {
+            logger.LogWarning(
+                "Meta:AppSecret is not configured. Webhook signature validation skipped.");
+            return true;
+        }
+
+        if (string.IsNullOrWhiteSpace(signatureHeader) ||
+            !signatureHeader.StartsWith("sha256=", StringComparison.OrdinalIgnoreCase))
+        {
+            logger.LogWarning("Invalid or missing X-Hub-Signature-256 header.");
+            return false;
+        }
+
+        var expectedSignatureHex = signatureHeader["sha256=".Length..];
+
+        using var hmac = new System.Security.Cryptography.HMACSHA256(
+            System.Text.Encoding.UTF8.GetBytes(appSecret));
+        var computedHashBytes = hmac.ComputeHash(
+            System.Text.Encoding.UTF8.GetBytes(rawBody));
+        var computedSignatureHex = Convert.ToHexString(computedHashBytes).ToLowerInvariant();
+
+        var isValid = System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+            System.Text.Encoding.UTF8.GetBytes(computedSignatureHex),
+            System.Text.Encoding.UTF8.GetBytes(expectedSignatureHex.ToLowerInvariant()));
+
+        if (!isValid)
+        {
+            logger.LogWarning("Meta webhook HMAC signature verification failed.");
+        }
+
+        return isValid;
     }
 
     // ── Process inbound message (POST) ───────────────────────────────
@@ -83,13 +110,13 @@ public sealed class MetaWhatsAppHandler
                 {
                     if (msg.Type != "text" || msg.Text is null)
                     {
-                        _logger.LogInformation(
+                        logger.LogInformation(
                             "Skipping non-text message. Type={Type} From={From}",
                             msg.Type, msg.From);
                         continue;
                     }
 
-                    _logger.LogInformation(
+                    logger.LogInformation(
                         "WhatsApp inbound. From={From} Body='{Body}'",
                         msg.From,
                         msg.Text.Body.Length > 80
@@ -100,7 +127,7 @@ public sealed class MetaWhatsAppHandler
 
                     // Fresh scope per message — AppDbContext is independent of
                     // the HTTP request that has already returned 200 to Meta.
-                    await using var scope = _scopeFactory.CreateAsyncScope();
+                    await using var scope = scopeFactory.CreateAsyncScope();
                     var orchestrator = scope.ServiceProvider
                         .GetRequiredService<IChatOrchestrator>();
 
@@ -119,7 +146,7 @@ public sealed class MetaWhatsAppHandler
                         chatResponse = await orchestrator.ProcessAsync(
                             chatRequest, cancellationToken);
 
-                        _logger.LogInformation(
+                        logger.LogInformation(
                             "Orchestrator OK. ConversationId={ConvId} " +
                             "Provider={Provider} ReplyLength={Len}",
                             chatResponse.ConversationId,
@@ -128,7 +155,7 @@ public sealed class MetaWhatsAppHandler
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogError(ex,
+                        logger.LogError(ex,
                             "Orchestrator failed for message {MsgId}.", msg.Id);
 
                         await SendReplyAsync(phoneNumberId, msg.From,
@@ -147,12 +174,12 @@ public sealed class MetaWhatsAppHandler
 
     private async Task SendReplyAsync(string phoneNumberId, string to, string body)
     {
-        var accessToken = _config["Meta:AccessToken"];
+        var accessToken = config["Meta:AccessToken"];
 
         if (string.IsNullOrWhiteSpace(phoneNumberId) ||
             string.IsNullOrWhiteSpace(accessToken))
         {
-            _logger.LogError(
+            logger.LogError(
                 "Cannot send reply — " +
                 "PhoneNumberId='{PNI}' AccessToken='{AT}'",
                 string.IsNullOrWhiteSpace(phoneNumberId) ? "MISSING" : "OK",
@@ -176,20 +203,20 @@ public sealed class MetaWhatsAppHandler
 
         try
         {
-            var response = await _http.SendAsync(request);
+            var response = await http.SendAsync(request);
             var responseBody = await response.Content.ReadAsStringAsync();
 
             if (!response.IsSuccessStatusCode)
-                _logger.LogError(
+                logger.LogError(
                     "Meta API error. Status={Status} Body={Body}",
                     (int)response.StatusCode, responseBody);
             else
-                _logger.LogInformation(
+                logger.LogInformation(
                     "WhatsApp reply sent. To={To} Length={Len}", to, body.Length);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "HTTP call to Meta API failed.");
+            logger.LogError(ex, "HTTP call to Meta API failed.");
         }
     }
 
@@ -197,7 +224,7 @@ public sealed class MetaWhatsAppHandler
 
     private async Task MarkAsReadAsync(string phoneNumberId, string messageId)
     {
-        var accessToken = _config["Meta:AccessToken"];
+        var accessToken = config["Meta:AccessToken"];
         if (string.IsNullOrWhiteSpace(accessToken)) return;
 
         try
@@ -215,11 +242,11 @@ public sealed class MetaWhatsAppHandler
                 message_id        = messageId
             });
 
-            await _http.SendAsync(request);
+            await http.SendAsync(request);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex,
+            logger.LogWarning(ex,
                 "Could not mark message {MsgId} as read.", messageId);
         }
     }

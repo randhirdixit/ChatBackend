@@ -1,9 +1,11 @@
 using ChatBackend.Core.DTOs;
 using ChatBackend.Core.Interfaces;
+using ChatBackend.Core.Models;
 using ChatBackend.Infrastructure.Data;
 using ChatBackend.Infrastructure.Orchestrator;
 using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 using Xunit;
@@ -193,5 +195,72 @@ public class ChatOrchestratorTests : IDisposable
 
         await act.Should().ThrowAsync<HttpRequestException>()
             .WithMessage("*Groq is unavailable*");
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(null)]
+    public async Task ProcessAsync_EmptyOrWhitespaceMessage_ThrowsArgumentException(string? invalidMessage)
+    {
+        var act = async () => await _sut.ProcessAsync(
+            new ChatRequest { UserMessage = invalidMessage! });
+
+        await act.Should().ThrowAsync<ArgumentException>();
+    }
+
+    [Fact]
+    public async Task ProcessAsync_SlidingWindow_LimitsContextHistory()
+    {
+        var inMemorySettings = new Dictionary<string, string?>
+        {
+            ["Chat:MaxHistoryMessages"] = "4"
+        };
+        var config = new Microsoft.Extensions.Configuration.ConfigurationBuilder()
+            .AddInMemoryCollection(inMemorySettings)
+            .Build();
+
+        var sutWithConfig = new ChatOrchestrator(
+            _db,
+            _llmMock.Object,
+            NullLogger<ChatOrchestrator>.Instance,
+            config);
+
+        IReadOnlyList<LLMMessage>? lastCapturedContext = null;
+        _llmMock
+            .Setup(l => l.CompleteAsync(It.IsAny<IReadOnlyList<LLMMessage>>(), default))
+            .Callback<IReadOnlyList<LLMMessage>, CancellationToken>((msgs, _) => lastCapturedContext = msgs)
+            .ReturnsAsync("Reply");
+
+        // Seed 4 turns (8 messages) into one conversation
+        var user = new User { ExternalId = "user-sliding", Source = "api" };
+        _db.Users.Add(user);
+
+        var conv = new Conversation { UserId = user.Id, Title = "Sliding Test" };
+        for (int i = 1; i <= 4; i++)
+        {
+            conv.Messages.Add(new Message { ConversationId = conv.Id, Role = "user", Content = $"Turn {i} user", CreatedAt = DateTimeOffset.UtcNow.AddMinutes(i) });
+            conv.Messages.Add(new Message { ConversationId = conv.Id, Role = "assistant", Content = $"Turn {i} assistant", CreatedAt = DateTimeOffset.UtcNow.AddMinutes(i).AddSeconds(1) });
+        }
+        _db.Conversations.Add(conv);
+        await _db.SaveChangesAsync();
+
+        await sutWithConfig.ProcessAsync(new ChatRequest
+        {
+            UserMessage    = "New user message",
+            UserId         = "user-sliding",
+            ConversationId = conv.Id,
+            Source         = "api"
+        });
+
+        lastCapturedContext.Should().NotBeNull();
+        // Context should be: 1 System prompt + 4 history messages (sliding window) + 1 current user turn = 6 messages
+        lastCapturedContext!.Count.Should().Be(6);
+        lastCapturedContext[0].Role.Should().Be("system");
+        lastCapturedContext[1].Content.Should().Be("Turn 3 user");
+        lastCapturedContext[2].Content.Should().Be("Turn 3 assistant");
+        lastCapturedContext[3].Content.Should().Be("Turn 4 user");
+        lastCapturedContext[4].Content.Should().Be("Turn 4 assistant");
+        lastCapturedContext[5].Content.Should().Be("New user message");
     }
 }

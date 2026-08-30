@@ -27,6 +27,7 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<Conversation>(e =>
         {
             e.HasKey(c => c.Id);
+            e.HasIndex(c => new { c.UserId, c.UpdatedAt });
             e.HasOne(c => c.User)
              .WithMany(u => u.Conversations)
              .HasForeignKey(c => c.UserId)
@@ -38,6 +39,7 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<Message>(e =>
         {
             e.HasKey(m => m.Id);
+            e.HasIndex(m => new { m.ConversationId, m.CreatedAt });
             e.HasOne(m => m.Conversation)
              .WithMany(c => c.Messages)
              .HasForeignKey(m => m.ConversationId)

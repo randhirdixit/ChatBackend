@@ -1,9 +1,13 @@
+using System.Threading.RateLimiting;
 using ChatBackend.Api.Endpoints;
 using ChatBackend.Api.Middleware;
 using ChatBackend.Infrastructure.Data;
 using ChatBackend.Infrastructure.Extensions;
 using Microsoft.EntityFrameworkCore;
-using System.Threading.RateLimiting;
+using Scalar.AspNetCore;
+
+// Automatically locate and load .env file into environment variables on startup
+DotNetEnv.Env.TraversePath().Load();
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -21,14 +25,7 @@ builder.Logging
 
 builder.Services.AddInfrastructure(builder.Configuration);
 
-builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen(opts =>
-    opts.SwaggerDoc("v1", new()
-    {
-        Title       = "ChatBackend API",
-        Version     = "v1",
-        Description = "WhatsApp AI chat backend — Groq Llama 3 + Meta Cloud API + SQLite"
-    }));
+builder.Services.AddOpenApi();
 
 // Fixed-window rate limit: 30 req/min per IP on /api/* routes
 builder.Services.AddRateLimiter(opts =>
@@ -69,14 +66,24 @@ using (var scope = app.Services.CreateScope())
 
 if (app.Environment.IsDevelopment())
 {
-    app.UseSwagger();
-    app.UseSwaggerUI();
+    app.MapOpenApi();
+    app.MapScalarApiReference(options =>
+    {
+        options.WithTitle("ChatBackend API")
+               .WithTheme(ScalarTheme.Moon);
+    });
+
+    app.MapGet("/", () => Results.Redirect("/scalar/v1"))
+       .ExcludeFromDescription();
+}
+else
+{
+    app.UseHttpsRedirection();
 }
 
 app.UseMiddleware<GlobalExceptionMiddleware>();
 app.UseCors();
 app.UseRateLimiter();
-app.UseHttpsRedirection();
 
 app.MapChatEndpoints();
 app.MapWhatsAppEndpoints();

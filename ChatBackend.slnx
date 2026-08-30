@@ -1,0 +1,11 @@
+<Solution>
+  <Configurations>
+    <Platform Name="Any CPU" />
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="ChatBackend.Api/ChatBackend.Api.csproj" />
+  <Project Path="ChatBackend.Core/ChatBackend.Core.csproj" />
+  <Project Path="ChatBackend.Infrastructure/ChatBackend.Infrastructure.csproj" />
+  <Project Path="ChatBackend.Tests/ChatBackend.Tests.csproj" />
+</Solution>

@@ -13,11 +13,12 @@ namespace ChatBackend.Infrastructure.LLM;
 /// /v1/chat/completions endpoint. HttpClient is injected via typed client
 /// registration in DI (BaseAddress + auth header pre-configured).
 /// </summary>
-public sealed class GroqAdapter : ILLMClient
+public sealed class GroqAdapter(
+    HttpClient http,
+    IConfiguration config,
+    ILogger<GroqAdapter> logger) : ILLMClient
 {
-    private readonly HttpClient _http;
-    private readonly ILogger<GroqAdapter> _logger;
-    private readonly string _model;
+    private readonly string _model = config["LLM:Groq:Model"] ?? "openai/gpt-oss-120b";
 
     public string ProviderName => "Groq";
 
@@ -26,29 +27,22 @@ public sealed class GroqAdapter : ILLMClient
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
 
-    public GroqAdapter(HttpClient http, IConfiguration config, ILogger<GroqAdapter> logger)
-    {
-        _http   = http;
-        _logger = logger;
-        _model  = config["LLM:Groq:Model"] ?? "llama-3.1-8b-instant";
-    }
-
     public async Task<string> CompleteAsync(
         IReadOnlyList<LLMMessage> messages,
         CancellationToken cancellationToken = default)
     {
         var body = BuildRequest(messages, stream: false);
 
-        _logger.LogDebug(
+        logger.LogDebug(
             "Groq request → model={Model} messages={Count}", _model, messages.Count);
 
-        var httpResponse = await _http.PostAsJsonAsync(
+        var httpResponse = await http.PostAsJsonAsync(
             "chat/completions", body, cancellationToken);
 
         if (!httpResponse.IsSuccessStatusCode)
         {
             var error = await httpResponse.Content.ReadAsStringAsync(cancellationToken);
-            _logger.LogError(
+            logger.LogError(
                 "Groq error. Status={Status} Body={Body}", httpResponse.StatusCode, error);
             throw new HttpRequestException(
                 $"Groq returned {(int)httpResponse.StatusCode}: {error}");
@@ -61,7 +55,7 @@ public sealed class GroqAdapter : ILLMClient
         var content = result.Choices.FirstOrDefault()?.Message.Content
             ?? throw new InvalidOperationException("Groq returned no choices.");
 
-        _logger.LogDebug(
+        logger.LogDebug(
             "Groq response ← tokens={Tokens}", result.Usage?.TotalTokens ?? 0);
 
         return content;
@@ -78,7 +72,7 @@ public sealed class GroqAdapter : ILLMClient
             Content = JsonContent.Create(body)
         };
 
-        using var response = await _http.SendAsync(
+        using var response = await http.SendAsync(
             req, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
 
         response.EnsureSuccessStatusCode();
@@ -86,9 +80,10 @@ public sealed class GroqAdapter : ILLMClient
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         using var reader = new StreamReader(stream);
 
-        while (!reader.EndOfStream && !cancellationToken.IsCancellationRequested)
+        while (!cancellationToken.IsCancellationRequested)
         {
             var line = await reader.ReadLineAsync(cancellationToken);
+            if (line is null) break;
             if (string.IsNullOrWhiteSpace(line)) continue;
             if (!line.StartsWith("data: ", StringComparison.Ordinal)) continue;
 

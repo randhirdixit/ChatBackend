@@ -27,45 +27,46 @@ namespace ChatBackend.Infrastructure.Orchestrator;
 ///   Sorting on DateTimeOffset is done in memory (LINQ to Objects) after fetching,
 ///   which is safe here because a user has few conversations and messages.
 /// </summary>
-public sealed class ChatOrchestrator : IChatOrchestrator
+public sealed class ChatOrchestrator(
+    AppDbContext db,
+    ILLMClient llm,
+    ILogger<ChatOrchestrator> logger,
+    Microsoft.Extensions.Configuration.IConfiguration? config = null,
+    TimeProvider? timeProvider = null) : IChatOrchestrator
 {
-    private readonly AppDbContext _db;
-    private readonly ILLMClient   _llm;
-    private readonly ILogger<ChatOrchestrator> _logger;
+    private readonly int _maxHistoryMessages =
+        int.TryParse(config?["Chat:MaxHistoryMessages"], out var max) && max > 0 ? max : 20;
+    private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
 
     private const string SystemPrompt =
         "You are a helpful, concise, and friendly AI assistant. " +
         "Answer in the language the user writes in. " +
         "Be direct and avoid unnecessary filler phrases.";
 
-    public ChatOrchestrator(
-        AppDbContext db,
-        ILLMClient   llm,
-        ILogger<ChatOrchestrator> logger)
-    {
-        _db     = db;
-        _llm    = llm;
-        _logger = logger;
-    }
-
     public async Task<ChatResponse> ProcessAsync(
         ChatRequest request,
         CancellationToken cancellationToken = default)
     {
+        var sanitizedMessage = request.UserMessage?.Trim() ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(sanitizedMessage))
+            throw new ArgumentException("UserMessage cannot be empty or whitespace.", nameof(request));
+
+        var now = _timeProvider.GetUtcNow();
+
         // ── 1. Resolve or create User ─────────────────────────────────
         var externalId = string.IsNullOrWhiteSpace(request.UserId)
             ? "anonymous"
             : request.UserId;
 
-        var user = await _db.Users.FirstOrDefaultAsync(
+        var user = await db.Users.FirstOrDefaultAsync(
             u => u.ExternalId == externalId && u.Source == request.Source,
             cancellationToken);
 
         if (user is null)
         {
-            user = new User { ExternalId = externalId, Source = request.Source };
-            _db.Users.Add(user);
-            _logger.LogInformation(
+            user = new User { ExternalId = externalId, Source = request.Source, CreatedAt = now };
+            db.Users.Add(user);
+            logger.LogInformation(
                 "New user created. ExternalId={ExternalId} Source={Source}",
                 externalId, request.Source);
         }
@@ -78,28 +79,21 @@ public sealed class ChatOrchestrator : IChatOrchestrator
             // API callers supply a ConversationId to resume a specific thread.
             // Load messages without EF ORDER BY — sort in memory to avoid
             // SQLite's DateTimeOffset ORDER BY limitation.
-            conversation = await _db.Conversations
+            conversation = await db.Conversations
                 .Include(c => c.Messages)
                 .FirstOrDefaultAsync(
                     c => c.Id == request.ConversationId && c.UserId == user.Id,
                     cancellationToken);
 
             if (conversation is null)
-                _logger.LogWarning(
+                logger.LogWarning(
                     "ConversationId={Id} not found for user — starting new.",
                     request.ConversationId);
         }
         else
         {
             // WhatsApp / channel callers: resume the most recent conversation.
-            //
-            // SQLite cannot sort DateTimeOffset in SQL, so we:
-            //   Step 1 — fetch only Id + UpdatedAt for this user (lightweight)
-            //   Step 2 — sort in memory to find the latest
-            //   Step 3 — load that conversation with its messages by Id
-            //
-            // This avoids bringing all message content into memory unnecessarily.
-            var latestId = (await _db.Conversations
+            var latestId = (await db.Conversations
                     .Where(c => c.UserId == user.Id)
                     .Select(c => new { c.Id, c.UpdatedAt })
                     .ToListAsync(cancellationToken))
@@ -108,7 +102,7 @@ public sealed class ChatOrchestrator : IChatOrchestrator
 
             if (latestId is not null)
             {
-                conversation = await _db.Conversations
+                conversation = await db.Conversations
                     .Include(c => c.Messages)           // no OrderBy here — sort below
                     .FirstOrDefaultAsync(c => c.Id == latestId, cancellationToken);
             }
@@ -118,47 +112,49 @@ public sealed class ChatOrchestrator : IChatOrchestrator
         {
             conversation = new Conversation
             {
-                UserId = user.Id,
-                Title  = request.UserMessage.Length > 60
-                    ? request.UserMessage[..60] + "…"
-                    : request.UserMessage
+                UserId    = user.Id,
+                Title     = sanitizedMessage.Length > 60 ? string.Concat(sanitizedMessage.AsSpan(0, 60), "…") : sanitizedMessage,
+                CreatedAt = now,
+                UpdatedAt = now
             };
-            _db.Conversations.Add(conversation);
-            _logger.LogInformation(
+            db.Conversations.Add(conversation);
+            logger.LogInformation(
                 "New conversation created. Id={ConversationId}", conversation.Id);
         }
 
-        // ── 3. Persist the inbound user message ───────────────────────
+        // ── 3. Build LLM context window from existing history ─────────
+        // Sort messages in memory and apply sliding context window budgeting.
+        var history = conversation.Messages
+            .OrderBy(m => m.CreatedAt)              // LINQ to Objects — safe
+            .Select(m => new LLMMessage(m.Role, m.Content))
+            .TakeLast(_maxHistoryMessages)
+            .ToList();
+
+        // Modern C# collection expression with spread operator
+        IReadOnlyList<LLMMessage> contextMessages = [
+            LLMMessage.System(SystemPrompt),
+            .. history,
+            LLMMessage.User(sanitizedMessage)
+        ];
+
+        // ── 4. Persist the inbound user message ───────────────────────
         var userMessage = new Message
         {
             ConversationId = conversation.Id,
             Role           = "user",
-            Content        = request.UserMessage
+            Content        = sanitizedMessage,
+            CreatedAt      = now
         };
-        _db.Messages.Add(userMessage);
-
-        // ── 4. Build LLM context window from full history ─────────────
-        // Sort messages in memory — avoids SQLite DateTimeOffset ORDER BY error.
-        var history = conversation.Messages
-            .OrderBy(m => m.CreatedAt)              // LINQ to Objects — safe
-            .Select(m => new LLMMessage(m.Role, m.Content))
-            .ToList();
-
-        var contextMessages = new List<LLMMessage>(history.Count + 2)
-        {
-            LLMMessage.System(SystemPrompt)
-        };
-        contextMessages.AddRange(history);
-        contextMessages.Add(LLMMessage.User(request.UserMessage));
+        db.Messages.Add(userMessage);
 
         // ── 5. Call LLM ───────────────────────────────────────────────
-        _logger.LogInformation(
+        logger.LogInformation(
             "Calling LLM. Provider={Provider} ConversationId={ConvId} " +
             "History={History} TotalContext={Total}",
-            _llm.ProviderName, conversation.Id,
+            llm.ProviderName, conversation.Id,
             history.Count, contextMessages.Count);
 
-        var assistantText = await _llm.CompleteAsync(contextMessages, cancellationToken);
+        var assistantText = await llm.CompleteAsync(contextMessages, cancellationToken);
 
         // ── 6. Persist the assistant reply ────────────────────────────
         var assistantMessage = new Message
@@ -166,14 +162,15 @@ public sealed class ChatOrchestrator : IChatOrchestrator
             ConversationId = conversation.Id,
             Role           = "assistant",
             Content        = assistantText,
-            Provider       = _llm.ProviderName
+            Provider       = llm.ProviderName,
+            CreatedAt      = _timeProvider.GetUtcNow()
         };
-        _db.Messages.Add(assistantMessage);
-        conversation.UpdatedAt = DateTimeOffset.UtcNow;
+        db.Messages.Add(assistantMessage);
+        conversation.UpdatedAt = assistantMessage.CreatedAt;
 
-        await _db.SaveChangesAsync(cancellationToken);
+        await db.SaveChangesAsync(cancellationToken);
 
-        _logger.LogInformation(
+        logger.LogInformation(
             "Saved. ConversationId={ConvId} MessageId={MsgId}",
             conversation.Id, assistantMessage.Id);
 
@@ -182,7 +179,7 @@ public sealed class ChatOrchestrator : IChatOrchestrator
             AssistantMessage: assistantText,
             ConversationId:   conversation.Id,
             MessageId:        assistantMessage.Id,
-            Provider:         _llm.ProviderName,
+            Provider:         llm.ProviderName,
             Timestamp:        assistantMessage.CreatedAt);
     }
 }

@@ -6,7 +6,7 @@ using Microsoft.EntityFrameworkCore.Migrations;
 namespace ChatBackend.Infrastructure.Migrations
 {
     /// <inheritdoc />
-    public partial class initial001 : Migration
+    public partial class InitialCreate : Migration
     {
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
@@ -69,14 +69,14 @@ namespace ChatBackend.Infrastructure.Migrations
                 });
 
             migrationBuilder.CreateIndex(
-                name: "IX_Conversations_UserId",
+                name: "IX_Conversations_UserId_UpdatedAt",
                 table: "Conversations",
-                column: "UserId");
+                columns: new[] { "UserId", "UpdatedAt" });
 
             migrationBuilder.CreateIndex(
-                name: "IX_Messages_ConversationId",
+                name: "IX_Messages_ConversationId_CreatedAt",
                 table: "Messages",
-                column: "ConversationId");
+                columns: new[] { "ConversationId", "CreatedAt" });
 
             migrationBuilder.CreateIndex(
                 name: "IX_Users_ExternalId_Source",

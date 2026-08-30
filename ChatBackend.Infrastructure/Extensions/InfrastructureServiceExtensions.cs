@@ -60,8 +60,21 @@ public static class InfrastructureServiceExtensions
         // HttpClient registration provides a client instance for outbound calls.
         // Singleton lifetime is safe because the handler creates its own DI scope
         // per inbound message via IServiceScopeFactory.
-        services.AddHttpClient<MetaWhatsAppHandler>();
+        services.AddHttpClient<MetaWhatsAppHandler>(client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(30);
+        })
+        .AddStandardResilienceHandler(opts =>
+        {
+            opts.Retry.MaxRetryAttempts = 3;
+            opts.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(45);
+        });
         services.AddSingleton<MetaWhatsAppHandler>();
+
+        // ── Background Channel & TimeProvider ─────────────────────────
+        services.AddSingleton(TimeProvider.System);
+        services.AddSingleton<WhatsAppMessageChannel>();
+        services.AddHostedService<WhatsAppMessageWorker>();
 
         return services;
     }

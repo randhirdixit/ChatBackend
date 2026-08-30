@@ -1,8 +1,7 @@
 # ChatBackend
 
-A production-ready, provider-agnostic AI chat backend built with **.NET 8 / C# 12**.  
-Switch between **Groq (Llama 3)** and **Azure OpenAI** via a single config value — no code changes.  
-Conversations are persisted in **SQLite** via EF Core. **WhatsApp** messaging is handled through **Twilio**.
+A production-ready, provider-agnostic AI chat backend built with **.NET 10 / C# 14**.  
+Powers conversational AI over **ASP.NET Core Minimal APIs** and **Meta WhatsApp Cloud API (Graph API)**, backed by **Groq Cloud API** and **SQLite** via Entity Framework Core. Interactive API documentation powered by **Scalar**.
 
 ---
 
@@ -21,17 +20,16 @@ Conversations are persisted in **SQLite** via EF Core. **WhatsApp** messaging is
          └────────┬────────────────────────────────┘
                   │
          ┌────────▼────────────────────┐
-         │      ILLMClient             │  ← single interface
+         │      ILLMClient             │  ← provider contract
          ├─────────────────────────────┤
-         │  GroqAdapter                │  ← llama3-8b-8192
-         │  AzureOpenAIAdapter (stub)  │
+         │  GroqAdapter                │  ← openai/gpt-oss-120b / llama-3.x
          └────────┬────────────────────┘
-                  │   LLMProviderFactory picks adapter from config
+                  │
          ┌────────▼────────────────────┐
          │      Infrastructure         │
          │  EF Core + SQLite           │
          │  Polly (retry + timeout)    │
-         │  Twilio SDK                 │
+         │  Meta WhatsApp Cloud API    │
          └─────────────────────────────┘
 ```
 
@@ -39,7 +37,7 @@ Conversations are persisted in **SQLite** via EF Core. **WhatsApp** messaging is
 
 ```
 ChatBackend/
-├── ChatBackend.sln
+├── ChatBackend.slnx
 ├── .env.sample                         ← copy → .env, fill secrets
 │
 ├── ChatBackend.Core/                   ← Zero dependencies — pure domain
@@ -49,42 +47,39 @@ ChatBackend/
 │   ├── DTOs/
 │   │   ├── ChatRequest.cs
 │   │   ├── ChatResponse.cs
-│   │   ├── LLMMessage.cs
-│   │   └── WhatsAppInboundMessage.cs
+│   │   └── LLMMessage.cs
 │   └── Models/
 │       ├── User.cs
 │       ├── Conversation.cs
 │       └── Message.cs
 │
-├── ChatBackend.Infrastructure/         ← EF Core, adapters, Twilio
+├── ChatBackend.Infrastructure/         ← EF Core, Groq adapter, Meta Cloud API
 │   ├── Data/
 │   │   ├── AppDbContext.cs
 │   │   ├── DesignTimeDbContextFactory.cs
 │   │   └── Migrations/
 │   ├── LLM/
-│   │   ├── GroqAdapter.cs              ← Primary adapter (Llama 3)
-│   │   ├── AzureOpenAIAdapter.cs       ← Stub — ready to implement
-│   │   ├── LLMProviderFactory.cs       ← Config-driven selection
+│   │   ├── GroqAdapter.cs              ← Primary adapter (Groq Cloud API)
 │   │   └── GroqModels.cs               ← Wire format records
+│   ├── Meta/
+│   │   ├── MetaWhatsAppHandler.cs      ← Webhook verification & Graph API messaging
+│   │   └── MetaModels.cs               ← Meta webhook & send payload DTOs
 │   ├── Orchestrator/
-│   │   └── ChatOrchestrator.cs
-│   ├── Twilio/
-│   │   └── TwilioWhatsAppHandler.cs
+│   │   └── ChatOrchestrator.cs         ← Turn management & context assembly
 │   └── Extensions/
 │       └── InfrastructureServiceExtensions.cs
 │
 ├── ChatBackend.Api/                    ← Entry point
-│   ├── Program.cs
+│   ├── Program.cs                      ← Minimal APIs, RateLimiter, CORS, Migrations
 │   ├── Endpoints/
-│   │   ├── ChatEndpoints.cs
-│   │   └── WhatsAppEndpoints.cs
+│   │   ├── ChatEndpoints.cs            ← POST /api/chat, GET /api/conversations/{id}
+│   │   └── WhatsAppEndpoints.cs        ← GET/POST /webhook/whatsapp
 │   ├── Middleware/
-│   │   └── GlobalExceptionMiddleware.cs
+│   │   └── GlobalExceptionMiddleware.cs ← RFC 7807 ProblemDetails
 │   ├── appsettings.json
 │   └── appsettings.Development.json
 │
-└── ChatBackend.Tests/                  ← xUnit + Moq + FluentAssertions
-    ├── LLMProviderFactoryTests.cs
+└── ChatBackend.Tests/                  ← xUnit v3 + Moq + FluentAssertions
     └── ChatOrchestratorTests.cs
 ```
 
@@ -94,11 +89,11 @@ ChatBackend/
 
 | Tool | Version | Install |
 |------|---------|---------|
-| .NET SDK | 8.0+ | https://dotnet.microsoft.com/download |
-| dotnet-ef  | latest | `dotnet tool install -g dotnet-ef` |
+| .NET SDK | 10.0+ | https://dotnet.microsoft.com/download |
+| dotnet-ef | latest | `dotnet tool install -g dotnet-ef` |
 | Groq API key | — | https://console.groq.com |
-| Twilio account | — | https://console.twilio.com |
-| ngrok (optional) | — | https://ngrok.com (for WhatsApp local testing) |
+| Meta for Developers Account | — | https://developers.facebook.com |
+| ngrok (optional) | — | https://ngrok.com (for WhatsApp local webhook testing) |
 
 ---
 
@@ -114,33 +109,23 @@ dotnet restore
 
 ### 2 — Set secrets
 
-**Option A — .env file (recommended for local dev)**
+**Option A — .env file (automatically loaded on startup via DotNetEnv)**
 
 ```bash
 cp .env.sample .env
 # edit .env with your real keys
 ```
 
-Then load it before running (Linux/macOS):
+> **Note:** `ChatBackend.Api` automatically locates and loads `.env` on startup in Visual Studio, Rider, or `dotnet run` without any manual exports.
 
-```bash
-export $(grep -v '^#' .env | xargs)
-```
-
-Or on Windows PowerShell:
-
-```powershell
-Get-Content .env | Where-Object { $_ -notmatch '^#' -and $_ -ne '' } |
-  ForEach-Object { $k,$v = $_ -split '=',2; [Environment]::SetEnvironmentVariable($k,$v) }
-```
-
-**Option B — dotnet user-secrets (cleanest for VS/Rider)**
+**Option B — dotnet user-secrets (cleanest for VS / Rider / CLI)**
 
 ```bash
 cd ChatBackend.Api
-dotnet user-secrets set "LLM:Groq:ApiKey"    "gsk_xxxx"
-dotnet user-secrets set "Twilio:AccountSid"  "ACxxxx"
-dotnet user-secrets set "Twilio:AuthToken"   "your_token"
+dotnet user-secrets set "LLM:Groq:ApiKey"     "gsk_xxxx"
+dotnet user-secrets set "Meta:AccessToken"    "EAAxxxx"
+dotnet user-secrets set "Meta:PhoneNumberId"  "123456789012345"
+dotnet user-secrets set "Meta:VerifyToken"    "your_secret_verify_token"
 ```
 
 ### 3 — Apply database migration
@@ -152,7 +137,7 @@ dotnet ef database update \
   --startup-project .
 ```
 
-> The app also auto-migrates on startup, so this step is optional for dev.
+> The application automatically runs pending EF Core migrations on startup, so this step is optional during development.
 
 ### 4 — Run
 
@@ -161,8 +146,8 @@ cd ChatBackend.Api
 dotnet run
 ```
 
-The API starts at **https://localhost:5001** (or http://localhost:5000).  
-Swagger UI: **https://localhost:5001/swagger**
+- API Base URL: **http://localhost:5000** (or https://localhost:5001)  
+- Swagger UI: **http://localhost:5000/swagger** (available in Development environment)
 
 ---
 
@@ -170,7 +155,7 @@ Swagger UI: **https://localhost:5001/swagger**
 
 ### `POST /api/chat`
 
-Send a message and receive an AI response.
+Send a chat message and receive an AI response.
 
 **Request body:**
 
@@ -191,7 +176,7 @@ Send a message and receive an AI response.
   "conversationId":   "3fa85f64-...",
   "messageId":        "7cb92e11-...",
   "provider":         "Groq",
-  "timestamp":        "2024-06-01T12:00:00Z"
+  "timestamp":        "2026-08-30T12:00:00Z"
 }
 ```
 
@@ -199,23 +184,44 @@ Send a message and receive an AI response.
 
 ```json
 {
-  "userMessage":    "Can you give me a Python example?",
+  "userMessage":    "Can you give me a code example?",
   "conversationId": "3fa85f64-..."
 }
 ```
 
+### `POST /api/chat/stream`
+
+Stream chat response token-by-token using **Server-Sent Events (SSE)**.
+
+**Request body:** Same as `/api/chat`.
+
+**Response `200 OK` (`text/event-stream`):**
+
+```text
+data: {"token":"Hello","conversationId":"3fa85f64-..."}
+
+data: {"token":" world","conversationId":"3fa85f64-..."}
+
+data: [DONE]
+```
+
 ### `GET /api/conversations/{conversationId}`
 
-Returns the full message history for a conversation.
+Returns the full message history for the given conversation ID.
 
 ### `GET /webhook/whatsapp`
 
-Twilio reachability check — responds `200 OK`.
+Meta webhook ownership verification handshake: validates `hub.verify_token` against `Meta:VerifyToken` and returns `hub.challenge`.
 
 ### `POST /webhook/whatsapp`
 
-Receives inbound WhatsApp messages from Twilio (form-encoded).  
-Validates Twilio signature, runs through `ChatOrchestrator`, sends reply via Twilio API.
+Receives inbound WhatsApp events from Meta Cloud API:
+1. Validates `X-Hub-Signature-256` HMAC-SHA256 signature if `Meta:AppSecret` is configured.
+2. Returns `200 OK` immediately (satisfies Meta's <5s SLA).
+3. Spawns an isolated DI scope (`IServiceScopeFactory`).
+4. Sends read receipt (double blue ticks) via Meta Graph API.
+5. Executes `ChatOrchestrator` to retrieve history, apply sliding context window, query LLM, and persist turns.
+6. Sends reply text back to user via Meta Graph API (`https://graph.facebook.com/v19.0/{phone_number_id}/messages`).
 
 ### `GET /health`
 
@@ -225,115 +231,54 @@ Validates Twilio signature, runs through `ChatOrchestrator`, sends reply via Twi
 
 ---
 
-## WhatsApp Setup (Twilio)
+## WhatsApp Setup (Meta Cloud API)
 
-1. Create a Twilio account → enable the **WhatsApp Sandbox** (or buy a number).
-2. Start ngrok to expose your local server:
+1. Go to [developers.facebook.com](https://developers.facebook.com) → create an app → add **WhatsApp**.
+2. Under **WhatsApp > API Setup**:
+   - Note your **Phone Number ID** (`Meta:PhoneNumberId`).
+   - Generate a temporary access token or configure a System User permanent token (`Meta:AccessToken`).
+   - Under **App settings > Basic**, copy your **App Secret** (`Meta:AppSecret`) for webhook HMAC signature verification.
+3. Start ngrok to expose your local API port:
    ```bash
-   ngrok http 5001
+   ngrok http 5000
    ```
-3. In the Twilio Console → **Messaging → Try it out → WhatsApp**, set:
-   - **When a message comes in:** `https://<ngrok-id>.ngrok.io/webhook/whatsapp`
-   - Method: **HTTP POST**
-4. Send a WhatsApp message to your Twilio sandbox number.  
-   The backend will reply via the Groq LLM.
-
-> **Signature validation** is disabled in Development (`Twilio:SkipSignatureValidation: true`).  
-> Set it to `false` in Production — the handler validates `X-Twilio-Signature` automatically.
-
----
-
-## Switching LLM Providers
-
-Change one environment variable — no code changes required:
-
-```bash
-# Use Groq (default)
-export LLM__Provider=Groq
-
-# Use Azure OpenAI
-export LLM__Provider=AzureOpenAI
-export LLM__AzureOpenAI__ApiKey=your_azure_key
-export LLM__AzureOpenAI__Endpoint=https://your-resource.openai.azure.com/
-export LLM__AzureOpenAI__DeploymentName=gpt-4o
-```
-
-> The `AzureOpenAIAdapter` is currently a stub. Implement `CompleteAsync` / `StreamAsync`  
-> using the `Azure.AI.OpenAI` NuGet package or the raw REST API.
+4. In Meta App Dashboard → **WhatsApp > Configuration > Webhook**:
+   - **Callback URL:** `https://<ngrok-id>.ngrok-free.app/webhook/whatsapp`
+   - **Verify Token:** The string configured in `Meta:VerifyToken` (e.g. `HareKrishnHareRam`)
+   - Click **Verify and Save**.
+   - Subscribe to the **`messages`** webhook field.
+5. Send a WhatsApp message to your test number. The backend will process your prompt through Groq and reply automatically.
 
 ---
 
 ## Running Tests
 
+Run the test suite via `dotnet run`:
+
 ```bash
-dotnet test --logger "console;verbosity=detailed"
+dotnet run --project ChatBackend.Tests
 ```
 
-Test coverage includes:
+Test coverage includes **21 automated unit tests**:
 
-| Test class | What it covers |
+| Test Suite | Focus Area |
 |---|---|
-| `LLMProviderFactoryTests` | Groq / Azure / unknown / missing config selection |
-| `ChatOrchestratorTests` | Happy path, DB persistence, multi-turn, anonymous user, LLM error, system prompt injection |
+| `ChatOrchestratorTests` | Lifecycle, persistence, sliding context window, multi-turn resumption, input validation, LLM error bubbling |
+| `MetaWhatsAppHandlerTests` | Handshake verification, HMAC-SHA256 signature security, payload parsing, message processing |
+| `GroqAdapterTests` | REST chat completions parsing, HTTP error mapping, SSE token streaming |
+| `WhatsAppMessageWorkerTests` | Channel transfer, background queue draining, hosted service lifecycle |
 
 ---
 
-## Adding a New LLM Provider
+## Interactive API Documentation (Scalar)
 
-1. Create `MyProvider/MyProviderAdapter.cs` implementing `ILLMClient`.
-2. Register its `HttpClient` in `InfrastructureServiceExtensions.cs`.
-3. Add `services.AddTransient<MyProviderAdapter>()`.
-4. Add a case in `LLMProviderFactory.Create()`:
-   ```csharp
-   "myprovider" => _services.GetRequiredService<MyProviderAdapter>(),
-   ```
-5. Set `LLM__Provider=MyProvider` in config.
+In `Development` mode, interactive API documentation is available at:
 
-That's it — no changes anywhere else.
-
----
-
-## EF Core Migrations (cheatsheet)
-
-```bash
-# Add a new migration (run from repo root)
-dotnet ef migrations add <MigrationName> \
-  --project ChatBackend.Infrastructure \
-  --startup-project ChatBackend.Api
-
-# Apply to database
-dotnet ef database update \
-  --project ChatBackend.Infrastructure \
-  --startup-project ChatBackend.Api
-
-# Rollback to previous migration
-dotnet ef database update <PreviousMigrationName> \
-  --project ChatBackend.Infrastructure \
-  --startup-project ChatBackend.Api
+```
+http://localhost:5000/scalar/v1
 ```
 
----
-
-## Rate Limiting
-
-The `/api/*` route group applies a **fixed-window** policy:
-
-- **30 requests / minute** per client IP
-- Queue of 5 additional requests (then 429)
-- Configurable in `Program.cs` → `AddRateLimiter`
-
----
-
-## Security Checklist
-
-- [x] API keys loaded from env vars — never hardcoded
-- [x] Secrets never logged (logger uses structured placeholders, not string interpolation for sensitive fields)
-- [x] Twilio signature validation (disable only in dev via `SkipSignatureValidation`)
-- [x] Stack traces never sent to clients (`GlobalExceptionMiddleware`)
-- [x] Rate limiting on all `/api/*` routes
-- [ ] JWT / API-key authentication — add `app.UseAuthentication()` + `RequireAuthorization()`
-- [ ] HTTPS enforcement — `UseHttpsRedirection()` already in pipeline; add cert in prod
-- [ ] CORS — tighten `AllowAnyOrigin()` to specific origins in production
+Scalar provides an interactive client, live request runner, theme switching, and auto-generated code snippets in C#, Python, JavaScript, and cURL.
 
 ---
 
@@ -341,17 +286,25 @@ The `/api/*` route group applies a **fixed-window** policy:
 
 | Variable | Required | Description |
 |---|---|---|
-| `LLM__Provider` | ✅ | `Groq` or `AzureOpenAI` |
-| `LLM__Groq__ApiKey` | ✅ (Groq) | Groq Cloud API key |
-| `LLM__Groq__Model` | ❌ | Default: `llama3-8b-8192` |
-| `LLM__AzureOpenAI__ApiKey` | ✅ (Azure) | Azure OpenAI key |
-| `LLM__AzureOpenAI__Endpoint` | ✅ (Azure) | Azure resource URL |
-| `LLM__AzureOpenAI__DeploymentName` | ✅ (Azure) | Model deployment name |
-| `TWILIO__ACCOUNTSID` | ✅ (WA) | Twilio Account SID |
-| `TWILIO__AUTHTOKEN` | ✅ (WA) | Twilio Auth Token |
-| `TWILIO__WHATSAPPNUMBER` | ✅ (WA) | `whatsapp:+1xxxxxxxxxx` |
+| `LLM__Groq__ApiKey` | ✅ | Groq Cloud API key (`gsk_...`) |
+| `LLM__Groq__Model` | ❌ | Model name (e.g. `openai/gpt-oss-120b`, `openai/gpt-oss-20b`) |
+| `LLM__Groq__BaseUrl` | ❌ | Default: `https://api.groq.com/openai/v1/` |
+| `META__ACCESSTOKEN` | ✅ (WhatsApp) | Meta Graph API access token |
+| `META__PHONENUMBERID` | ✅ (WhatsApp) | WhatsApp Business Phone Number ID |
+| `META__VERIFYTOKEN` | ✅ (WhatsApp) | Secret token for webhook GET verification |
+| `META__APPSECRET` | ❌ (Prod) | Meta App Secret for webhook HMAC-SHA256 signature verification |
+| `CHAT__MAXHISTORYMESSAGES` | ❌ | Max context messages sliding window (Default: `20`) |
 | `CONNECTIONSTRINGS__SQLITE` | ❌ | Default: `Data Source=chat.db` |
 | `ASPNETCORE_ENVIRONMENT` | ❌ | `Development` / `Production` |
+
+---
+
+## Rate Limiting
+
+The `/api/*` route group applies a **fixed-window** policy:
+- **30 requests / minute** per client IP
+- Queue limit of 5 requests (returns 429 when exceeded)
+- Configured in `Program.cs` (`AddRateLimiter`)
 
 ---
 
@@ -359,12 +312,13 @@ The `/api/*` route group applies a **fixed-window** policy:
 
 | Layer | Technology |
 |---|---|
-| Runtime | .NET 8, C# 12 |
+| Runtime | .NET 10, C# 14 |
 | API | ASP.NET Core Minimal APIs |
-| ORM | EF Core 8 + SQLite |
-| LLM (primary) | Groq Cloud — Llama 3 8B |
-| LLM (alternate) | Azure OpenAI (stub) |
-| Messaging | Twilio SDK (WhatsApp) |
+| Background Queues | System.Threading.Channels + BackgroundService |
+| Time Abstraction | System.TimeProvider |
+| ORM | EF Core 10 + SQLite |
+| LLM Provider | Groq Cloud API |
+| Messaging | Meta WhatsApp Cloud API (Graph API v19.0) |
 | Resilience | Microsoft.Extensions.Http.Resilience (Polly 8) |
-| Testing | xUnit + Moq + FluentAssertions |
-| Docs | Swagger / OpenAPI |
+| Testing | xUnit v3 + Moq + FluentAssertions |
+| API Reference UI | Scalar (Scalar.AspNetCore) + Microsoft.AspNetCore.OpenApi |

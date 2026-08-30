@@ -37,6 +37,7 @@ public static class WhatsAppEndpoints
         group.MapPost("/whatsapp", async (
             HttpContext ctx,
             MetaWhatsAppHandler handler,
+            WhatsAppMessageChannel channel,
             ILogger<Program> logger) =>
         {
             string rawBody;
@@ -48,6 +49,13 @@ public static class WhatsAppEndpoints
 
             if (string.IsNullOrWhiteSpace(rawBody))
                 return Results.Ok();
+
+            var signatureHeader = ctx.Request.Headers["X-Hub-Signature-256"].FirstOrDefault();
+            if (!handler.ValidateSignature(rawBody, signatureHeader))
+            {
+                logger.LogWarning("Unauthorized WhatsApp webhook request: invalid signature.");
+                return Results.Unauthorized();
+            }
 
             MetaWebhookPayload? payload;
             try
@@ -69,20 +77,8 @@ public static class WhatsAppEndpoints
                 return Results.Ok();
             }
 
-            // Fire-and-forget: return 200 to Meta immediately (required within 5s).
-            // MetaWhatsAppHandler creates its OWN fresh DI scope per message internally,
-            // so AppDbContext is completely independent of this (now-ending) request scope.
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    await handler.ProcessInboundAsync(payload, CancellationToken.None);
-                }
-                catch (Exception ex)
-                {
-                    logger.LogError(ex, "ProcessInboundAsync failed.");
-                }
-            });
+            // Enqueue payload into background channel for guaranteed processing
+            await channel.Writer.WriteAsync(payload);
 
             return Results.Ok();
         })

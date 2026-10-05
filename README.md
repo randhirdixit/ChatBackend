@@ -63,7 +63,9 @@ ChatBackend/
 │   │   └── GroqModels.cs               ← Wire format records
 │   ├── Meta/
 │   │   ├── MetaWhatsAppHandler.cs      ← Webhook verification & Graph API messaging
-│   │   └── MetaModels.cs               ← Meta webhook & send payload DTOs
+│   │   ├── MetaModels.cs               ← Meta webhook & send payload DTOs
+│   │   ├── WhatsAppMessageChannel.cs   ← In-memory bounded queue channel
+│   │   └── WhatsAppMessageWorker.cs    ← Background worker draining webhook queue
 │   ├── Orchestrator/
 │   │   └── ChatOrchestrator.cs         ← Turn management & context assembly
 │   └── Extensions/
@@ -80,7 +82,10 @@ ChatBackend/
 │   └── appsettings.Development.json
 │
 └── ChatBackend.Tests/                  ← xUnit v3 + Moq + FluentAssertions
-    └── ChatOrchestratorTests.cs
+    ├── ChatOrchestratorTests.cs
+    ├── GroqAdapterTests.cs
+    ├── MetaWhatsAppHandlerTests.cs
+    └── WhatsAppMessageWorkerTests.cs
 ```
 
 ---
@@ -147,7 +152,7 @@ dotnet run
 ```
 
 - API Base URL: **http://localhost:5000** (or https://localhost:5001)  
-- Swagger UI: **http://localhost:5000/swagger** (available in Development environment)
+- Interactive API Documentation (Scalar): **http://localhost:5000/scalar/v1** (or navigate to **http://localhost:5000/** in Development)
 
 ---
 
@@ -253,7 +258,13 @@ Receives inbound WhatsApp events from Meta Cloud API:
 
 ## Running Tests
 
-Run the test suite via `dotnet run`:
+Run the test suite using `dotnet test`:
+
+```bash
+dotnet test
+```
+
+Or run the test project directly:
 
 ```bash
 dotnet run --project ChatBackend.Tests

@@ -333,3 +333,12 @@ The `/api/*` route group applies a **fixed-window** policy:
 | Resilience | Microsoft.Extensions.Http.Resilience (Polly 8) |
 | Testing | xUnit v3 + Moq + FluentAssertions |
 | API Reference UI | Scalar (Scalar.AspNetCore) + Microsoft.AspNetCore.OpenApi |
+
+---
+
+## License & Copyright
+
+Copyright © 2026 Randhir Dixit. All rights reserved.
+
+This repository and its source code are made available publicly for viewing, portfolio review, and evaluation purposes only. No permission is granted for commercial use, copying, modification, or redistribution without prior written permission. See [LICENSE](LICENSE) for details.
+
